@@ -4,8 +4,9 @@
 import os
 import re
 
-SLUG = re.compile('[- a-zA-Z0-9.]+')
-SPDX = re.compile(f'SPDX-License-Identifier:\s+({SLUG.pattern})')
+SLUG = re.compile(r'[- a-zA-Z0-9.]+')
+SPDX = re.compile(rf'SPDX-License-Identifier:\s+({SLUG.pattern})')
+COPYRIGHT = re.compile(r'Copyright\s+\(c\)\s+(\d{4})(?:-(\d{4}))?\s+([a-zA-Z0-9 ,.]+)')
 
 class Language:
     def __init__(self, *comments, shebang=False):
@@ -13,25 +14,43 @@ class Language:
         self.__shebang = shebang
 
         self.__match = []
+        self.__copyright_match = []
         for comment in comments:
             (init, fini) = (comment, '')
             if isinstance(comment, tuple):
                 (init, fini) = comment
 
-            pattern = f"^{init}\s*{SPDX.pattern}\s*{fini}\s*$"
+            pattern = rf"^{init}\s*{SPDX.pattern}\s*{fini}\s*$"
             self.__match.append(re.compile(pattern))
+            pattern = rf"^{init}\s*{COPYRIGHT.pattern}\s*{fini}\s*$"
+            self.__copyright_match.append(re.compile(pattern))
 
     def license(self, path):
         "Find the license from the SPDX header."
         with open(path) as f:
-            lines = f.readlines()
+            lines = f.readlines(1024)
             for line in lines:
                 for matcher in self.__match:
                     match = matcher.match(line)
                     if match:
                         return match.group(1)
-
         return None
+
+    def copyright(self, path):
+        "Find the copyright from the file header."
+        with open(path) as f:
+            lines = f.readlines(1024)
+            for line in lines:
+                for matcher in self.__copyright_match:
+                    match = matcher.match(line)
+                    if match:
+                        if match.group(2):
+                            year = match.group(2)
+                        else:
+                            year = match.group(1)
+                        owner = match.group(3)
+                        return (owner, year)
+        return (None, None)
 
 class Index:
     INTERPRETERS = {
@@ -83,7 +102,7 @@ class Index:
     def language(self, path):
         name = self.EXTENSIONS.get(os.path.splitext(path)[1])
         if name is None:
-            interpreter = None
+            interpreter = ""
             with open(path, "rb") as f:
                 if f.read(2) == bytearray('#!'.encode('ascii')):
                     # assume a text file and retry as text file
@@ -95,7 +114,7 @@ class Index:
             name = self.INTERPRETERS.get(interpreter)
         return self.__languages.get(name)
 
-    def scan(self, root):
+    def scan_dir(self, root):
         IGNORE_DIRS = { ".git" }
 
         for root, dirs, files in os.walk(root):
@@ -105,11 +124,11 @@ class Index:
 
             for file in files:
                 path = os.path.join(root, file)
-                
+
                 # If the file is a symlink, don't bother
                 if os.path.islink( path ):
                     continue
-                # If the file is empty skip. 
+                # If the file is empty skip.
                 if os.path.getsize(path) == 0:
                     continue
                 # Find the language of the file.
@@ -117,19 +136,55 @@ class Index:
                 if language is None:
                     continue
 
-                # Parse the SPDX header for the language.
-                yield (path, language.license(path))
+                yield path
+
+    def scan_list(self, files):
+        for file in files:
+            path = file
+
+            # If the file is a symlink, don't bother
+            if os.path.islink( path ):
+                continue
+            # If the file is empty skip.
+            if os.path.getsize(path) == 0:
+                continue
+            # Find the language of the file.
+            language = self.language(path)
+            if language is None:
+                continue
+
+            # Parse the SPDX header and copyright string for the language.
+            yield (path, language.license(path), language.copyright(path))
 
 if __name__ == '__main__':
-    import sys
-    import json
+    import argparse
+    from pathlib import Path
+    from datetime import datetime
 
-    # Validate the arguments
-    licenses = os.getenv('INPUT_LICENSES')
-    if licenses is None:
-        licenses = sys.argv[1:]
-    else:
-        licenses = json.loads(licenses)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--licenses', required=True, help='Comma-separated list of allowed licenses')
+    parser.add_argument('--files', required=False, help='Comma-separated list of files to check')
+    parser.add_argument('--copyright', required=False, help='the owner of the copyright')
+
+    args = parser.parse_args()
+    files_to_check = None
+    copyright_owner = None
+
+
+    if args.copyright:
+        copyright_owner = args.copyright
+
+    # Process licenses
+    licenses = [license.strip() for license in args.licenses.split(',')]
+
+    # Process files
+    if args.files:
+        files_to_check = [Path(f) for f in args.files.split(',')]
+
+    # Your verification logic here
+    print(f"Allowed licenses: {licenses}")
+    print(f"Files to check: {files_to_check}")
+
     for license in licenses:
         if not SLUG.match(license):
             print("Invalid license '%s'!" % license)
@@ -137,12 +192,35 @@ if __name__ == '__main__':
 
     rv = 0
     index = Index()
-    for (path, license) in index.scan("."):
-        if license not in licenses:
-            if license == None:
-                print(f"NO SPDX {path}")
-            else:
-                print(f"{license:16} {path}")
-            rv = 1
+
+    # collect files if the list is not provided
+    if not files_to_check:
+        files_to_check = index.scan_dir(".")
+
+    if files_to_check:
+        # get current year
+        current_year = str(datetime.now().year)
+
+        for (path, license, (copyright, year)) in index.scan_list(files_to_check):
+            if license not in licenses:
+                if license == None:
+                    print(f"NO SPDX {path}")
+                else:
+                    print(f"Invalid license {license:16} {path}")
+                rv = 1
+
+            if copyright_owner is not None:
+                if copyright is None:
+                    print(f"NO COPYRIGHT {path}")
+                elif copyright != copyright_owner:
+                    print(f"Copyright mismatch {path} {copyright}")
+                    if year is None:
+                        print(f"NO YEAR {path}")
+                    elif year != current_year:
+                        print(f"Year mismatch {path} {year} {current_year}")
+                        rv = 1
+                    rv = 1
+
+
 
     raise SystemExit(rv)

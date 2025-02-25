@@ -14,9 +14,26 @@ inputs:
         Apache-2.0
         Apache-2.0 WITH LLVM-exception
     required: true
-    default: ''
+    default: ""
+  files:
+    description: >
+      The coma separated list of files to run this action on. Can be empty
+    required: false
+    default: ""
+  copyright:
+    description: >
+      The copyright owner to check for in the license headers. Can be empty
+    required: false
+    default: ""
 runs:
   using: "composite"
   steps:
-    - run: echo "${{ inputs.licenses }}" | xargs -d "\n" $GITHUB_ACTION_PATH/verify-spdx-headers
+    - run: |
+        # Convert newline-separated licenses to comma-separated
+        LICENSES_CSV=$(echo "${{ inputs.licenses }}" | tr '\n' ',' | sed 's/,$//')
+
+        python3 $GITHUB_ACTION_PATH/verify-spdx-headers \
+          --files "${{ inputs.files }}" \
+          --licenses "$LICENSES_CSV" \
+          --copyright "${{ inputs.copyright }}"
       shell: bash
